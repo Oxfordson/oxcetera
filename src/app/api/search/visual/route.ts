@@ -5,11 +5,12 @@ import { createClient } from '@supabase/supabase-js';
 
 export const runtime = 'nodejs';
 
-// ==========================================
-// CONFIGURATION
-// ==========================================
-
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+const RESULT_LIMIT = 8;
+const MAX_RETRIES = 3;
+
+const GEMINI_MODEL =
+  process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
 const ALLOWED_IMAGE_TYPES = new Set([
   'image/jpeg',
@@ -19,16 +20,6 @@ const ALLOWED_IMAGE_TYPES = new Set([
   'image/heif',
 ]);
 
-const GEMINI_MODEL =
-  process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-
-const MAX_RETRIES = 3;
-const INITIAL_RETRY_DELAY = 1000;
-
-// ==========================================
-// TYPES
-// ==========================================
-
 type IdentifiedProduct = {
   brand: string;
   title: string;
@@ -36,90 +27,65 @@ type IdentifiedProduct = {
   keywords: string[];
 };
 
-type GeminiError = {
-  code?: number;
-  status?: number | string;
-  message?: string;
+type CatalogProduct = {
+  id: string | number;
+  slug: string | null;
+  title: string;
+  category: string | null;
+  description: string | null;
+  image_url: string | null;
+  price: number | string | null;
+  [key: string]: unknown;
 };
 
-// ==========================================
-// HELPER FUNCTIONS
-// ==========================================
+type MatchType =
+  | 'direct'
+  | 'category'
+  | 'catalog'
+  | 'none';
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
+  return error instanceof Error
+    ? error.message
+    : String(error);
 }
 
-function getGeminiError(error: unknown): GeminiError {
-  const message = getErrorMessage(error);
-
-  const result: GeminiError = {
-    message,
-  };
-
+function getErrorCode(error: unknown): number | undefined {
   if (error && typeof error === 'object') {
-    const obj = error as Record<string, unknown>;
+    const value = error as Record<string, unknown>;
 
-    if (typeof obj.status === 'number') {
-      result.status = obj.status;
+    if (typeof value.status === 'number') {
+      return value.status;
     }
 
-    if (typeof obj.code === 'number') {
-      result.code = obj.code;
-    }
-
-    if (typeof obj.status === 'string') {
-      result.status = obj.status;
+    if (typeof value.code === 'number') {
+      return value.code;
     }
   }
 
-  // Gemini may return JSON inside the error message.
   try {
-    const parsed = JSON.parse(message);
-
-    if (parsed?.error) {
-      const nested = parsed.error;
-
-      result.code = nested.code ?? result.code;
-      result.status = nested.status ?? result.status;
-      result.message = nested.message ?? message;
-    }
+    const parsed = JSON.parse(getErrorMessage(error));
+    return parsed?.error?.code;
   } catch {
-    // Error message is not JSON.
+    return undefined;
   }
-
-  return result;
 }
 
 function isRetryableError(error: unknown): boolean {
-  const geminiError = getGeminiError(error);
-
-  const message = (
-    geminiError.message || ''
-  ).toLowerCase();
+  const code = getErrorCode(error);
+  const message = getErrorMessage(error).toLowerCase();
 
   return (
-    geminiError.code === 503 ||
-    geminiError.code === 429 ||
-    geminiError.status === 503 ||
-    geminiError.status === 429 ||
-    geminiError.status === 'UNAVAILABLE' ||
-    geminiError.status === 'RESOURCE_EXHAUSTED' ||
+    code === 503 ||
+    code === 429 ||
+    message.includes('unavailable') ||
     message.includes('high demand') ||
-    message.includes('temporarily unavailable')
+    message.includes('resource_exhausted')
   );
 }
-
-// ==========================================
-// GEMINI RETRY FUNCTION
-// ==========================================
 
 async function generateWithRetry(
   ai: GoogleGenAI,
@@ -127,28 +93,10 @@ async function generateWithRetry(
     GoogleGenAI['models']['generateContent']
   >[0]
 ) {
-  for (
-    let attempt = 0;
-    attempt <= MAX_RETRIES;
-    attempt++
-  ) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      console.log(
-        `Gemini request attempt ${attempt + 1}/${MAX_RETRIES + 1}`
-      );
-
-      const response =
-        await ai.models.generateContent(request);
-
-      return response;
-    } catch (error: unknown) {
-      const geminiError = getGeminiError(error);
-
-      console.error(
-        `Gemini attempt ${attempt + 1} failed:`,
-        geminiError
-      );
-
+      return await ai.models.generateContent(request);
+    } catch (error) {
       if (
         !isRetryableError(error) ||
         attempt === MAX_RETRIES
@@ -156,37 +104,177 @@ async function generateWithRetry(
         throw error;
       }
 
-      // Exponential backoff with jitter
       const delay =
-        INITIAL_RETRY_DELAY *
-          Math.pow(2, attempt) +
-        Math.floor(Math.random() * 500);
+        1000 * Math.pow(2, attempt) +
+        Math.floor(Math.random() * 400);
 
       console.warn(
-        `Gemini busy. Retrying in ${delay}ms...`
+        `Gemini unavailable. Retrying in ${delay}ms`
       );
 
       await sleep(delay);
     }
   }
 
-  throw new Error(
-    'Gemini failed after maximum retry attempts'
-  );
+  throw new Error('Gemini request failed');
 }
 
-// ==========================================
-// MAIN VISUAL SEARCH API
-// ==========================================
+// ------------------------------------------
+// TOKENIZATION
+// ------------------------------------------
+
+const STOP_WORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'from',
+  'this',
+  'that',
+  'product',
+  'beauty',
+  'cosmetic',
+  'cosmetics',
+  'item',
+  'a',
+  'an',
+]);
+
+function tokenize(value: string): string[] {
+  return value
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(
+      (token) =>
+        token.length >= 3 &&
+        !STOP_WORDS.has(token)
+    );
+}
+
+function buildSearchTokens(
+  identified: IdentifiedProduct
+): string[] {
+  const combined = [
+    identified.brand,
+    identified.title,
+    identified.category,
+    ...identified.keywords,
+  ].join(' ');
+
+  return [...new Set(tokenize(combined))].slice(0, 12);
+}
+
+// Escape characters meaningful to PostgREST filters
+// and SQL LIKE patterns.
+function safeToken(token: string): string {
+  return token.replace(/[^a-z0-9]/gi, '');
+}
+
+function buildOrFilter(tokens: string[]): string {
+  const columns = [
+    'title',
+    'category',
+    'description',
+  ];
+
+  return tokens
+    .flatMap((token) => {
+      const safe = safeToken(token);
+
+      if (!safe) return [];
+
+      return columns.map(
+        (column) => `${column}.ilike.%${safe}%`
+      );
+    })
+    .join(',');
+}
+
+// ------------------------------------------
+// PRODUCT RANKING
+// ------------------------------------------
+
+function scoreProduct(
+  product: CatalogProduct,
+  identified: IdentifiedProduct,
+  tokens: string[]
+): number {
+  const title = String(product.title || '').toLowerCase();
+  const category = String(
+    product.category || ''
+  ).toLowerCase();
+  const description = String(
+    product.description || ''
+  ).toLowerCase();
+
+  const brand = identified.brand.toLowerCase();
+  const identifiedTitle = identified.title.toLowerCase();
+  const identifiedCategory =
+    identified.category.toLowerCase();
+
+  let score = 0;
+
+  if (brand && title.includes(brand)) {
+    score += 12;
+  }
+
+  if (
+    identifiedTitle &&
+    title.includes(identifiedTitle)
+  ) {
+    score += 15;
+  }
+
+  if (
+    identifiedCategory &&
+    category.includes(identifiedCategory)
+  ) {
+    score += 8;
+  }
+
+  for (const token of tokens) {
+    if (title.includes(token)) {
+      score += 5;
+    }
+
+    if (category.includes(token)) {
+      score += 3;
+    }
+
+    if (description.includes(token)) {
+      score += 1;
+    }
+  }
+
+  return score;
+}
+
+function uniqueProducts(
+  products: CatalogProduct[]
+): CatalogProduct[] {
+  const seen = new Set<string>();
+
+  return products.filter((product) => {
+    const key = String(product.id);
+
+    if (seen.has(key)) return false;
+
+    seen.add(key);
+    return true;
+  });
+}
+
+// ------------------------------------------
+// MAIN API
+// ------------------------------------------
 
 export async function POST(req: NextRequest) {
   try {
-    // --------------------------------------
-    // STEP 1: Validate environment variables
-    // --------------------------------------
-
     const apiKey = process.env.GEMINI_API_KEY;
-
     const supabaseUrl =
       process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -195,20 +283,19 @@ export async function POST(req: NextRequest) {
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
     if (!apiKey || !supabaseUrl || !supabaseKey) {
-      console.error(
-        'Missing Gemini or Supabase environment variables'
-      );
-
       return NextResponse.json(
-        {
-          error: 'Server configuration is incomplete',
-        },
+        { error: 'Missing server configuration' },
         { status: 500 }
       );
     }
 
+    const supabase = createClient(
+      supabaseUrl,
+      supabaseKey
+    );
+
     // --------------------------------------
-    // STEP 2: Receive uploaded image
+    // 1. IMAGE INGESTION
     // --------------------------------------
 
     let formData: FormData;
@@ -217,9 +304,7 @@ export async function POST(req: NextRequest) {
       formData = await req.formData();
     } catch {
       return NextResponse.json(
-        {
-          error: 'Invalid multipart form data',
-        },
+        { error: 'Invalid form data' },
         { status: 400 }
       );
     }
@@ -228,30 +313,17 @@ export async function POST(req: NextRequest) {
 
     if (!(file instanceof File)) {
       return NextResponse.json(
-        {
-          error: 'No image uploaded',
-        },
+        { error: 'No image uploaded' },
         { status: 400 }
       );
     }
-
-    // --------------------------------------
-    // STEP 3: Validate image type
-    // --------------------------------------
 
     if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
       return NextResponse.json(
-        {
-          error:
-            'Unsupported image type. Use JPEG, PNG, WebP, HEIC or HEIF.',
-        },
+        { error: 'Unsupported image format' },
         { status: 400 }
       );
     }
-
-    // --------------------------------------
-    // STEP 4: Validate image size
-    // --------------------------------------
 
     if (
       file.size === 0 ||
@@ -259,45 +331,40 @@ export async function POST(req: NextRequest) {
     ) {
       return NextResponse.json(
         {
-          error:
-            'Image must be non-empty and no larger than 10 MB',
+          error: 'Image must be between 1 byte and 10 MB',
         },
         { status: 400 }
       );
     }
 
-    // --------------------------------------
-    // STEP 5: Convert image to Base64
-    // --------------------------------------
-
-    const buffer = Buffer.from(
+    const imageBuffer = Buffer.from(
       await file.arrayBuffer()
     );
 
-    const base64Data = buffer.toString('base64');
+    const base64Data = imageBuffer.toString('base64');
 
     // --------------------------------------
-    // STEP 6: Initialize Gemini
+    // 2. GEMINI VISION
     // --------------------------------------
 
-    const ai = new GoogleGenAI({
-      apiKey,
-    });
+    const ai = new GoogleGenAI({ apiKey });
 
-    // --------------------------------------
-    // STEP 7: Analyze image with retries
-    // --------------------------------------
+    let identified: IdentifiedProduct = {
+      brand: '',
+      title: '',
+      category: '',
+      keywords: [],
+    };
 
-    let response;
+    let analysisError: string | null = null;
 
     try {
-      response = await generateWithRetry(ai, {
+      const response = await generateWithRetry(ai, {
         model: GEMINI_MODEL,
 
         contents: [
           {
             role: 'user',
-
             parts: [
               {
                 inlineData: {
@@ -307,26 +374,25 @@ export async function POST(req: NextRequest) {
               },
               {
                 text: `
-                  Analyze this image carefully.
+Identify the beauty or cosmetic product
+shown in this image.
 
-                  Identify the beauty or cosmetic
-                  product shown.
+Return:
+- brand
+- title
+- category
+- 2 to 3 useful search keywords
 
-                  Extract:
+Use broad searchable categories such as:
+lipstick, foundation, mascara, skincare,
+moisturizer, perfume, cleanser, powder,
+blush, eyeshadow, or haircare.
 
-                  1. Brand name
-                  2. Product title
-                  3. Product category
-                  4. Two or three searchable keywords
+Do not invent an exact brand or product name.
 
-                  Important rules:
+If unknown, use empty strings.
 
-                  - Do not invent brand names.
-                  - Do not invent product names.
-                  - Use empty strings for unknown fields.
-                  - Use an empty array if no keywords
-                    can be identified.
-                  - Return structured JSON only.
+Return valid JSON only.
                 `,
               },
             ],
@@ -335,31 +401,17 @@ export async function POST(req: NextRequest) {
 
         config: {
           responseMimeType: 'application/json',
-
           responseSchema: {
             type: Type.OBJECT,
-
             properties: {
-              brand: {
-                type: Type.STRING,
-              },
-
-              title: {
-                type: Type.STRING,
-              },
-
-              category: {
-                type: Type.STRING,
-              },
-
+              brand: { type: Type.STRING },
+              title: { type: Type.STRING },
+              category: { type: Type.STRING },
               keywords: {
                 type: Type.ARRAY,
-                items: {
-                  type: Type.STRING,
-                },
+                items: { type: Type.STRING },
               },
             },
-
             required: [
               'brand',
               'title',
@@ -369,223 +421,198 @@ export async function POST(req: NextRequest) {
           },
         },
       });
-    } catch (error: unknown) {
-      const geminiError = getGeminiError(error);
 
-      console.error(
-        'Gemini analysis failed:',
-        geminiError
-      );
+      const raw = JSON.parse(response.text || '{}');
 
-      const unavailable = isRetryableError(error);
+      identified = {
+        brand:
+          typeof raw.brand === 'string'
+            ? raw.brand.trim()
+            : '',
+        title:
+          typeof raw.title === 'string'
+            ? raw.title.trim()
+            : '',
+        category:
+          typeof raw.category === 'string'
+            ? raw.category.trim()
+            : '',
+        keywords: Array.isArray(raw.keywords)
+          ? raw.keywords
+              .filter(
+                (item: unknown): item is string =>
+                  typeof item === 'string'
+              )
+              .map((item: string) => item.trim())
+              .filter(Boolean)
+          : [],
+      };
+    } catch (error) {
+      console.error('Gemini analysis failed:', error);
 
-      return NextResponse.json(
-        {
-          error: unavailable
-            ? 'Gemini is temporarily unavailable'
-            : 'Gemini image analysis failed',
+      analysisError = isRetryableError(error)
+        ? 'AI identification is temporarily unavailable'
+        : 'AI could not identify the image';
+    }
 
-          details:
-            process.env.NODE_ENV === 'development'
-              ? geminiError.message
-              : undefined,
+    // --------------------------------------
+    // 3. TOKEN-BASED SEARCH
+    // --------------------------------------
 
-          retryable: unavailable,
-        },
-        {
-          status: unavailable ? 503 : 502,
-          headers: unavailable
-            ? { 'Retry-After': '15' }
-            : {},
+    const tokens = buildSearchTokens(identified);
+
+    console.log('Visual search tokens:', tokens);
+
+    let matchedProducts: CatalogProduct[] = [];
+    let matchType: MatchType = 'none';
+
+    if (tokens.length > 0) {
+      const filter = buildOrFilter(tokens);
+
+      const { data, error } = await supabase
+        .from('products')
+        .select('*')
+        .or(filter)
+        .limit(80);
+
+      if (error) {
+        console.error(
+          'Token search error:',
+          error.message
+        );
+      } else {
+        const candidates =
+          (data || []) as CatalogProduct[];
+
+        matchedProducts = candidates
+          .map((product) => ({
+            product,
+            score: scoreProduct(
+              product,
+              identified,
+              tokens
+            ),
+          }))
+          .filter((entry) => entry.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, RESULT_LIMIT)
+          .map((entry) => entry.product);
+
+        if (matchedProducts.length > 0) {
+          matchType = 'direct';
         }
-      );
+      }
     }
 
     // --------------------------------------
-    // STEP 8: Validate Gemini response
+    // 4. CATEGORY FALLBACK
     // --------------------------------------
-
-    if (!response.text) {
-      return NextResponse.json(
-        {
-          error: 'AI could not identify the product',
-        },
-        { status: 422 }
-      );
-    }
-
-    // --------------------------------------
-    // STEP 9: Parse Gemini JSON
-    // --------------------------------------
-
-    let raw: unknown;
-
-    try {
-      raw = JSON.parse(response.text);
-    } catch {
-      console.error(
-        'Invalid Gemini JSON:',
-        response.text
-      );
-
-      return NextResponse.json(
-        {
-          error: 'AI returned invalid JSON',
-        },
-        { status: 502 }
-      );
-    }
 
     if (
-      !raw ||
-      typeof raw !== 'object' ||
-      Array.isArray(raw)
+      matchedProducts.length < RESULT_LIMIT &&
+      identified.category
     ) {
-      return NextResponse.json(
-        {
-          error:
-            'AI returned an invalid product description',
-        },
-        { status: 502 }
+      const categoryTokens = tokenize(
+        identified.category
       );
-    }
 
-    // --------------------------------------
-    // STEP 10: Normalize extracted data
-    // --------------------------------------
+      if (categoryTokens.length > 0) {
+        const categoryFilter = buildOrFilter(
+          categoryTokens
+        );
 
-    const result = raw as Record<
-      string,
-      unknown
-    >;
+        const { data, error } = await supabase
+          .from('products')
+          .select('*')
+          .or(categoryFilter)
+          .limit(40);
 
-    const asString = (
-      value: unknown
-    ): string =>
-      typeof value === 'string'
-        ? value.trim()
-        : '';
+        if (error) {
+          console.error(
+            'Category fallback error:',
+            error.message
+          );
+        } else {
+          const categoryProducts =
+            (data || []) as CatalogProduct[];
 
-    const parsed: IdentifiedProduct = {
-      brand: asString(result.brand),
+          if (
+            matchedProducts.length === 0 &&
+            categoryProducts.length > 0
+          ) {
+            matchType = 'category';
+          }
 
-      title: asString(result.title),
-
-      category: asString(result.category),
-
-      keywords: Array.isArray(result.keywords)
-        ? result.keywords
-            .filter(
-              (item): item is string =>
-                typeof item === 'string'
-            )
-            .map((item) => item.trim())
-            .filter(Boolean)
-        : [],
-    };
-
-    // --------------------------------------
-    // STEP 11: Build product search query
-    // --------------------------------------
-
-    const queryTerm = [
-      parsed.brand,
-      parsed.title,
-      ...parsed.keywords,
-      parsed.category,
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .trim();
-
-    console.log(
-      'Visual search query:',
-      queryTerm
-    );
-
-    if (!queryTerm) {
-      return NextResponse.json({
-        identified: parsed,
-        products: [],
-        message:
-          'No searchable product information found',
-      });
-    }
-
-    // --------------------------------------
-    // STEP 12: Initialize Supabase
-    // --------------------------------------
-
-    const supabase = createClient(
-      supabaseUrl,
-      supabaseKey
-    );
-
-    // --------------------------------------
-    // STEP 13: Search matching products
-    // --------------------------------------
-
-    const {
-      data: products,
-      error: supabaseError,
-    } = await supabase.rpc(
-      'search_products_visual',
-      {
-        query_text: queryTerm,
-        match_limit: 8,
+          matchedProducts = uniqueProducts([
+            ...matchedProducts,
+            ...categoryProducts,
+          ]).slice(0, RESULT_LIMIT);
+        }
       }
-    );
-
-    if (supabaseError) {
-      console.error(
-        'Supabase query error:',
-        supabaseError
-      );
-
-      return NextResponse.json(
-        {
-          error: 'Product search failed',
-
-          details:
-            process.env.NODE_ENV === 'development'
-              ? supabaseError.message
-              : undefined,
-        },
-        { status: 500 }
-      );
     }
 
     // --------------------------------------
-    // STEP 14: Return successful response
+    // 5. GENERAL CATALOG FALLBACK
     // --------------------------------------
 
-    return NextResponse.json(
-      {
-        identified: parsed,
-        products: products ?? [],
-      },
-      { status: 200 }
-    );
+    if (matchedProducts.length < RESULT_LIMIT) {
+      const { data, error } = await supabase
+        .from('products')
+        .select('*')
+        .limit(RESULT_LIMIT * 3);
+
+      if (error) {
+        console.error(
+          'Catalog fallback error:',
+          error.message
+        );
+      } else {
+        const catalogProducts =
+          (data || []) as CatalogProduct[];
+
+        if (
+          matchedProducts.length === 0 &&
+          catalogProducts.length > 0
+        ) {
+          matchType = 'catalog';
+        }
+
+        matchedProducts = uniqueProducts([
+          ...matchedProducts,
+          ...catalogProducts,
+        ]).slice(0, RESULT_LIMIT);
+      }
+    }
+
+    // --------------------------------------
+    // 6. RETURN RESULTS
+    // --------------------------------------
+
+    return NextResponse.json({
+      success: true,
+      identified,
+      products: matchedProducts,
+      matchType,
+      searchTokens: tokens,
+      analysisError,
+      message:
+        matchType === 'direct'
+          ? 'Products matching your image'
+          : matchType === 'category'
+          ? 'Related products from this category'
+          : matchType === 'catalog'
+          ? 'Explore products from our catalog'
+          : 'No catalog products available',
+    });
   } catch (error: unknown) {
-    // --------------------------------------
-    // GLOBAL ERROR HANDLER
-    // --------------------------------------
-
-    console.error(
-      '=== VISUAL SEARCH ERROR ==='
-    );
-
-    console.error(error);
-
-    const message = getErrorMessage(error);
+    console.error('Visual search error:', error);
 
     return NextResponse.json(
       {
-        error: 'Image analysis failed',
-
+        error: 'Visual search failed',
         details:
           process.env.NODE_ENV === 'development'
-            ? message
+            ? getErrorMessage(error)
             : undefined,
       },
       { status: 500 }
