@@ -5,6 +5,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { useCartStore } from '@/store/useCartStore';
+import { VisualSearchModal } from '@/components/VisualSearchModal';
 import { 
   ShoppingBag, 
   Search, 
@@ -17,7 +18,7 @@ import {
   Camera 
 } from 'lucide-react';
 
-// Expanded Mega Menu Data Structure for all Beauty Categories[cite: 8]
+// Expanded Mega Menu Data Structure for all Beauty Categories
 const categories = [
   {
     name: 'SKINCARE',
@@ -129,6 +130,7 @@ export function Navbar() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
   const [activeMegaMenu, setActiveMegaMenu] = useState<string | null>(null);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
 
   // SEO-friendly routing handler for search submission
   const handleSearchSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -145,7 +147,7 @@ export function Navbar() {
   return (
     <header className="w-full bg-white flex flex-col z-50 sticky top-0 border-b border-gray-200">
       
-      {/* Top Utility Bar[cite: 8] */}
+      {/* Top Utility Bar */}
       <div className="hidden lg:flex w-full bg-[#0A2A6A] text-white text-xs font-medium justify-between items-center px-4">
         <div className="flex-1"></div>
         <div className="flex-1 text-center py-1.5 flex items-center justify-center gap-2">
@@ -165,13 +167,13 @@ export function Navbar() {
         </div>
       </div>
 
-      {/* Main Header Row[cite: 8] */}
+      {/* Main Header Row */}
       <div className="max-w-[1440px] w-full mx-auto px-4 sm:px-6 lg:px-8 relative">
         
         {/* Standard View (Hidden when mobile search is active) */}
         <div className={`items-center justify-between h-20 gap-8 ${isMobileSearchOpen ? 'hidden' : 'flex'}`}>
           
-          {/* Mobile Menu Toggle[cite: 8] */}
+          {/* Mobile Menu Toggle */}
           <button 
             className="lg:hidden p-2 -ml-2 text-gray-700 hover:text-[#0A2A6A] transition"
             onClick={() => setIsMobileMenuOpen(true)}
@@ -180,7 +182,7 @@ export function Navbar() {
             <Menu className="w-6 h-6" />
           </button>
 
-          {/* Logo area[cite: 8] */}
+          {/* Logo area */}
           <Link href="/" className="flex flex-shrink-0 items-center" aria-label="Oxcetera Beauty Home">
             <Image 
               src="/images/logo_blue.png" 
@@ -192,7 +194,7 @@ export function Navbar() {
             />
           </Link>
 
-          {/* Primary Navigation (Desktop)[cite: 8] */}
+          {/* Primary Navigation (Desktop) */}
           <nav className="hidden lg:flex flex-1 justify-center space-x-6 xl:space-x-8 font-bold text-sm tracking-wide text-[#333333]">
             {categories.map((category) => (
               <div 
@@ -208,7 +210,7 @@ export function Navbar() {
                   {category.name}
                 </Link>
 
-                {/* Mega Menu Dropdown[cite: 8] */}
+                {/* Mega Menu Dropdown */}
                 {category.subcategories.length > 0 && activeMegaMenu === category.name && (
                   <div className="absolute top-[calc(100%-1px)] left-0 w-full bg-white border-t border-b border-gray-200 shadow-lg py-8 px-8 flex justify-center gap-12 xl:gap-16 cursor-default">
                     {category.subcategories.map((subGroup) => (
@@ -236,7 +238,7 @@ export function Navbar() {
             ))}
           </nav>
 
-          {/* Right Action Icons & Search[cite: 8] */}
+          {/* Right Action Icons & Search */}
           <div className="flex items-center space-x-2 md:space-x-4">
             
             {/* Functional Search Bar (Desktop) - Accessible & SEO compliant */}
@@ -258,12 +260,16 @@ export function Navbar() {
                 aria-label="Search products"
                 required
               />
-              <button type="button" aria-label="Visual Search">
+              <button 
+                type="button" 
+                aria-label="Visual Search"
+                onClick={() => setIsCameraOpen(true)}
+              >
                 <Camera className="w-4 h-4 text-gray-400 hover:text-[#0A2A6A] ml-2" />
               </button>
             </form>
 
-            {/* Mobile/Tablet Search Icon[cite: 8] */}
+            {/* Mobile/Tablet Search Icon */}
             <button 
               className="lg:hidden p-2 text-gray-700 hover:text-[#0A2A6A]" 
               aria-label="Open Search"
@@ -313,6 +319,16 @@ export function Navbar() {
                 autoFocus
                 required
               />
+              <button 
+                type="button" 
+                aria-label="Visual Search"
+                onClick={() => {
+                  setIsMobileSearchOpen(false);
+                  setIsCameraOpen(true);
+                }}
+              >
+                <Camera className="w-5 h-5 text-gray-400 hover:text-[#0A2A6A] ml-2 flex-shrink-0" />
+              </button>
             </form>
             <button 
               onClick={() => setIsMobileSearchOpen(false)} 
@@ -326,7 +342,7 @@ export function Navbar() {
 
       </div>
 
-      {/* Mobile Sidebar Overlay[cite: 8] */}
+      {/* Mobile Sidebar Overlay */}
       {isMobileMenuOpen && (
         <div className="fixed inset-0 z-[60] lg:hidden">
           <div 
@@ -336,7 +352,7 @@ export function Navbar() {
           />
           <div className="absolute top-0 left-0 w-4/5 max-w-sm h-full bg-white shadow-2xl flex flex-col overflow-y-auto">
             <div className="p-4 flex items-center justify-between border-b border-gray-100">
-              {/* Mobile Sidebar Logo[cite: 8] */}
+              {/* Mobile Sidebar Logo */}
               <Image 
                 src="/images/logo_blue.png" 
                 alt="Oxcetera Logo" 
@@ -376,6 +392,9 @@ export function Navbar() {
           </div>
         </div>
       )}
+
+      {/* Render the Visual Search Modal globally */}
+      <VisualSearchModal isOpen={isCameraOpen} onClose={() => setIsCameraOpen(false)} />
     </header>
   );
 }
