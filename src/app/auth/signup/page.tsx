@@ -2,19 +2,15 @@
 'use client';
 
 import { useActionState } from 'react';
-import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { Mail, LockKeyhole, LogIn } from 'lucide-react';
+import { UserPlus, Mail, LockKeyhole } from 'lucide-react';
 
-import { signIn } from '../actions';
+import { signUp } from '../actions';
 import { initialAuthState } from '../auth-state';
 
-export default function LoginPage() {
-  const searchParams = useSearchParams();
-  const redirectTo = searchParams.get('redirect') || '/account';
-
+export default function SignUpPage() {
   const [state, formAction, pending] = useActionState(
-    signIn,
+    signUp,
     initialAuthState
   );
 
@@ -30,21 +26,39 @@ export default function LoginPage() {
           </Link>
 
           <h1 className="mt-6 text-2xl font-bold text-gray-900">
-            Welcome Back
+            Create Your Account
           </h1>
 
           <p className="mt-2 text-sm text-gray-500">
-            Sign in to manage your account and orders.
+            Join Oxcetera to shop and track your beauty orders.
           </p>
         </div>
 
         <div className="rounded-2xl border border-gray-200 bg-white p-7 shadow-sm">
           <form action={formAction} className="space-y-5">
-            <input
-              type="hidden"
-              name="redirect"
-              value={redirectTo}
-            />
+            <div>
+              <label
+                htmlFor="full_name"
+                className="mb-2 block text-sm font-semibold"
+              >
+                Full Name
+              </label>
+
+              <div className="relative">
+                <UserPlus className="absolute left-3 top-3.5 h-4 w-4 text-gray-400" />
+
+                <input
+                  id="full_name"
+                  name="full_name"
+                  autoComplete="name"
+                  required
+                  minLength={2}
+                  maxLength={100}
+                  placeholder="Your full name"
+                  className="w-full rounded-lg border border-gray-300 py-3 pl-10 pr-3 text-sm focus:border-[#0A2A6A] focus:outline-none"
+                />
+              </div>
+            </div>
 
             <div>
               <label
@@ -84,12 +98,33 @@ export default function LoginPage() {
                   id="password"
                   name="password"
                   type="password"
-                  autoComplete="current-password"
+                  autoComplete="new-password"
+                  minLength={12}
                   required
-                  placeholder="Enter your password"
+                  placeholder="At least 12 characters"
                   className="w-full rounded-lg border border-gray-300 py-3 pl-10 pr-3 text-sm focus:border-[#0A2A6A] focus:outline-none"
                 />
               </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="confirm_password"
+                className="mb-2 block text-sm font-semibold"
+              >
+                Confirm Password
+              </label>
+
+              <input
+                id="confirm_password"
+                name="confirm_password"
+                type="password"
+                autoComplete="new-password"
+                minLength={12}
+                required
+                placeholder="Repeat your password"
+                className="w-full rounded-lg border border-gray-300 px-3 py-3 text-sm focus:border-[#0A2A6A] focus:outline-none"
+              />
             </div>
 
             {state.error && (
@@ -101,23 +136,31 @@ export default function LoginPage() {
               </p>
             )}
 
+            {state.success && (
+              <p
+                role="status"
+                className="rounded-lg bg-green-50 p-3 text-sm text-green-800"
+              >
+                {state.success}
+              </p>
+            )}
+
             <button
               type="submit"
               disabled={pending}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#0A2A6A] py-3 font-semibold text-white transition hover:bg-blue-900 disabled:opacity-60"
+              className="w-full rounded-lg bg-[#0A2A6A] py-3 font-semibold text-white transition hover:bg-blue-900 disabled:opacity-60"
             >
-              <LogIn className="h-4 w-4" />
-              {pending ? 'Signing In...' : 'Sign In'}
+              {pending ? 'Creating Account...' : 'Create Account'}
             </button>
           </form>
 
           <p className="mt-6 text-center text-sm text-gray-600">
-            New to Oxcetera?{' '}
+            Already registered?{' '}
             <Link
-              href="/auth/signup"
+              href="/auth/login"
               className="font-bold text-[#0A2A6A] hover:underline"
             >
-              Create an Account
+              Sign In
             </Link>
           </p>
         </div>
